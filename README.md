@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # APKGuard — Android APK Security Analysis Platform
 
 A modern, cybersecurity SaaS web application for static security analysis of Android APK files. Built with Next.js App Router, React, TypeScript, and Tailwind CSS.
@@ -59,3 +60,7 @@ To connect APKGuard to your Python backend:
    - `GET /api/reports/{id}`
    - `GET /api/files`
    - `DELETE /api/files/{id}`
+=======
+# APK
+Android APK Static Security Analysis Platform
+>>>>>>> 54a977d83c22fb19500301c6abfb173dc06f6343
