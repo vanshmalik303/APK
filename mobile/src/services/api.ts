@@ -1,0 +1,412 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { APKRecord, SecurityReport, UserProfile, ScanStatus, Finding } from '../types';
+
+const STORAGE_FILES_KEY = '@apkguard_files';
+const STORAGE_REPORTS_KEY = '@apkguard_reports';
+const STORAGE_PROFILE_KEY = '@apkguard_profile';
+
+export const INITIAL_USER_PROFILE: UserProfile = {
+  fullName: 'Alex Vance',
+  email: 'alex.vance@securitylab.dev',
+  role: 'Senior AppSec Engineer',
+  joinedDate: 'October 2024',
+  avatarUrl: '',
+  apiAccessEnabled: true,
+  autoScanHeuristics: true,
+  notificationsEnabled: true,
+  defaultExportFormat: 'JSON',
+};
+
+export const MOCK_REPORTS: Record<string, SecurityReport> = {
+  'rep-001': {
+    id: 'rep-001',
+    apkId: 'apk-001',
+    fileName: 'CryptoVault-v2.4.1.apk',
+    fileSizeBytes: 34812736,
+    formattedSize: '33.2 MB',
+    packageName: 'com.cryptovault.wallet.secure',
+    versionName: '2.4.1',
+    versionCode: '104',
+    minSdkVersion: 24,
+    targetSdkVersion: 33,
+    sha256: '9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08',
+    scanDate: 'Nov 20, 2026 • 14:32 UTC',
+    status: 'ISSUES_FOUND',
+    riskScore: {
+      score: 78,
+      level: 'HIGH',
+      methodology:
+        'Calculated using a CVSS-weighted penalty model: Critical (-30 pts), High (-15 pts), Medium (-8 pts), Low (-2 pts). Baseline security score of 100 reduced by cumulative weighted risk factors.',
+      breakdown: {
+        critical: 1,
+        high: 2,
+        medium: 3,
+        low: 2,
+        informational: 4,
+      },
+    },
+    permissions: [
+      { name: 'android.permission.INTERNET', description: 'Allows application to open network sockets', isDangerous: false },
+      { name: 'android.permission.ACCESS_FINE_LOCATION', description: 'Allows app to access precise location', isDangerous: true },
+      { name: 'android.permission.READ_EXTERNAL_STORAGE', description: 'Allows app to read from external storage', isDangerous: true },
+      { name: 'android.permission.WRITE_EXTERNAL_STORAGE', description: 'Allows app to write to external storage', isDangerous: true },
+      { name: 'android.permission.RECEIVE_BOOT_COMPLETED', description: 'Allows app to start receiver on boot', isDangerous: false },
+      { name: 'android.permission.USE_BIOMETRIC', description: 'Allows app to authenticate using biometrics', isDangerous: false },
+    ],
+    summary: {
+      totalFindings: 9,
+      confirmedFindings: 6,
+      heuristicDetections: 3,
+    },
+    findings: [
+      {
+        id: 'find-001',
+        title: 'Hardcoded Secret API Key in Application Bytecode',
+        severity: 'CRITICAL',
+        category: 'Cryptography',
+        shortExplanation: 'Plaintext secret credential found embedded within decompiled class constants.',
+        evidence: 'com.cryptovault.network.ApiClient: private static final String API_SECRET = "sk_live_99d8a39f1c7e92b8d4e7f1";',
+        affectedComponent: 'com.cryptovault.network.ApiClient.smali (Line 42)',
+        whyItMatters:
+          'Hardcoded production secrets can be extracted by any party decompiling the APK with standard reverse engineering utilities (such as jadx or apktool). This exposes privileged backend endpoints to unauthenticated abuse.',
+        recommendedFix:
+          'Remove secret keys from client binaries. Authenticate client apps using OAuth tokens or store transient secrets in Android Keystore / remote secret management servers.',
+        isHeuristic: false,
+        cwe: 'CWE-798',
+      },
+      {
+        id: 'find-002',
+        title: 'Insecure Cleartext HTTP Traffic Explicitly Permitted',
+        severity: 'HIGH',
+        category: 'Network Security',
+        shortExplanation: 'Network security config permits cleartext HTTP transmissions to multiple remote hosts.',
+        evidence: '<domain-config cleartextTrafficPermitted="true"><domain includeSubdomains="true">api.cryptovault-backend.net</domain></domain-config>',
+        affectedComponent: 'res/xml/network_security_config.xml',
+        whyItMatters:
+          'Transmitting payload data over unencrypted HTTP enables Man-In-The-Middle (MITM) eavesdropping, token interception, and session hijacking on untrusted Wi-Fi connections.',
+        recommendedFix:
+          'Enforce cleartextTrafficPermitted="false" globally in your network security configuration and route all API calls over TLS 1.3 endpoints with certificate pinning.',
+        isHeuristic: false,
+        cwe: 'CWE-319',
+      },
+      {
+        id: 'find-003',
+        title: 'Exported Activity Without Access Permission or Signature Check',
+        severity: 'HIGH',
+        category: 'Component Exposure',
+        shortExplanation: 'Sensitive internal payment confirmation activity is exported and callable by any installed app.',
+        evidence: '<activity android:name=".ui.PaymentConfirmActivity" android:exported="true" />',
+        affectedComponent: 'AndroidManifest.xml (<activity .PaymentConfirmActivity>)',
+        whyItMatters:
+          'Third-party malware installed on the victim device can launch this Activity via explicit Intent, bypassing earlier authentication checkpoints or triggering unauthorized transaction prompts.',
+        recommendedFix:
+          'Set android:exported="false" unless the component is intentionally exposed to the Android system. If it must be exposed, guard it with a signature-level custom permission.',
+        isHeuristic: false,
+        cwe: 'CWE-926',
+      },
+      {
+        id: 'find-004',
+        title: 'Insecure Storage: World-Readable SharedPreferences Detected',
+        severity: 'MEDIUM',
+        category: 'Storage & Privacy',
+        shortExplanation: 'Preferences file initialized using deprecated MODE_WORLD_READABLE flag.',
+        evidence: 'context.getSharedPreferences("user_session_tokens", Context.MODE_WORLD_READABLE);',
+        affectedComponent: 'com.cryptovault.storage.SessionManager.java (Line 89)',
+        whyItMatters:
+          'World-readable preferences can be queried by any local application on Android devices prior to modern sandbox isolation policies, leading to session token theft.',
+        recommendedFix:
+          'Use Context.MODE_PRIVATE and migrate sensitive values to EncryptedSharedPreferences (part of Android Jetpack Security).',
+        isHeuristic: false,
+        cwe: 'CWE-276',
+      },
+      {
+        id: 'find-005',
+        title: 'Weak Cryptographic PRNG Usage for Nonce Generation',
+        severity: 'MEDIUM',
+        category: 'Cryptography',
+        shortExplanation: 'Standard java.util.Random used instead of java.security.SecureRandom in cryptographic payload nonce.',
+        evidence: 'Random random = new Random(); byte[] nonce = new byte[16]; random.nextBytes(nonce);',
+        affectedComponent: 'com.cryptovault.crypto.SigningUtils.java (Line 114)',
+        whyItMatters:
+          'java.util.Random is statistically predictable. An adversary capable of observing consecutive transactions may deduce the seed and forge message authenticators.',
+        recommendedFix:
+          'Replace java.util.Random with java.security.SecureRandom for all security-sensitive identifiers, seeds, and initialization vectors.',
+        isHeuristic: true,
+        cwe: 'CWE-338',
+      },
+      {
+        id: 'find-006',
+        title: 'Application Marked as Debuggable in Manifest',
+        severity: 'MEDIUM',
+        category: 'Manifest & Permissions',
+        shortExplanation: 'android:debuggable attribute is set to true in release manifest.',
+        evidence: '<application android:name=".App" android:debuggable="true" ...>',
+        affectedComponent: 'AndroidManifest.xml',
+        whyItMatters:
+          'Debuggable applications allow JDWP debugger attachments, enabling arbitrary memory inspection, variable spoofing, and runtime tampering.',
+        recommendedFix:
+          'Ensure android:debuggable is false in your build.gradle release build type and stripped during compilation.',
+        isHeuristic: false,
+        cwe: 'CWE-215',
+      },
+      {
+        id: 'find-007',
+        title: 'Implicit Intent Filter without Target Package',
+        severity: 'LOW',
+        category: 'Component Exposure',
+        shortExplanation: 'Broadcast dispatched via implicit Intent without specifying destination package.',
+        evidence: 'Intent intent = new Intent("com.cryptovault.ACTION_AUTH_REFRESH"); sendBroadcast(intent);',
+        affectedComponent: 'com.cryptovault.services.AuthService.java',
+        whyItMatters:
+          'Broadcasts without explicit package targets can be intercepted by any registered receiver on the system.',
+        recommendedFix:
+          'Use LocalBroadcastManager or specify intent.setPackage(getPackageName()).',
+        isHeuristic: true,
+        cwe: 'CWE-927',
+      },
+      {
+        id: 'find-008',
+        title: 'Obsolete TLS Protocol Versions Allowed in TrustManager',
+        severity: 'LOW',
+        category: 'Network Security',
+        shortExplanation: 'TLSv1.0 and TLSv1.1 protocols not explicitly excluded in custom SSL socket factory.',
+        evidence: 'sslContext.init(null, trustManagers, null); // SSLContext.getInstance("TLS")',
+        affectedComponent: 'com.cryptovault.network.CustomSSLSocket.java',
+        whyItMatters:
+          'Legacy TLS versions are prone to protocol downgrade attacks such as BEAST and POODLE.',
+        recommendedFix:
+          'Restrict negotiated protocols to TLSv1.2 and TLSv1.3 only.',
+        isHeuristic: true,
+        cwe: 'CWE-326',
+      },
+      {
+        id: 'find-009',
+        title: 'ProGuard / R8 Obfuscation Heuristic Warning',
+        severity: 'INFORMATIONAL',
+        category: 'Code Quality',
+        shortExplanation: 'Over 68% of class and method symbols remain unabbreviated in DEX bytecode.',
+        evidence: 'Disassembly inspection indicates full method signatures retained.',
+        affectedComponent: 'classes.dex',
+        whyItMatters:
+          'Unobfuscated code allows attackers to read reverse-engineered logic and proprietary business routines with high fidelity.',
+        recommendedFix:
+          'Enable minifyEnabled true and optimize proguard-rules.pro for release variants.',
+        isHeuristic: true,
+        cwe: 'CWE-656',
+      },
+    ],
+  },
+  'rep-002': {
+    id: 'rep-002',
+    apkId: 'apk-002',
+    fileName: 'HealthSync-Tracker-v1.0.apk',
+    fileSizeBytes: 18245900,
+    formattedSize: '17.4 MB',
+    packageName: 'io.healthsync.tracker',
+    versionName: '1.0.0',
+    versionCode: '1',
+    minSdkVersion: 26,
+    targetSdkVersion: 34,
+    sha256: '4a3b2c1d0e9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b',
+    scanDate: 'Nov 18, 2026 • 09:15 UTC',
+    status: 'SAFE',
+    riskScore: {
+      score: 12,
+      level: 'SAFE',
+      methodology:
+        'Calculated using a CVSS-weighted penalty model. Minor informational heuristics detected; zero critical or high severity vulnerabilities found.',
+      breakdown: {
+        critical: 0,
+        high: 0,
+        medium: 0,
+        low: 1,
+        informational: 2,
+      },
+    },
+    permissions: [
+      { name: 'android.permission.INTERNET', description: 'Network communication', isDangerous: false },
+      { name: 'android.permission.ACTIVITY_RECOGNITION', description: 'Detect physical activity', isDangerous: true },
+      { name: 'android.permission.POST_NOTIFICATIONS', description: 'Post status notifications', isDangerous: false },
+    ],
+    summary: {
+      totalFindings: 3,
+      confirmedFindings: 1,
+      heuristicDetections: 2,
+    },
+    findings: [
+      {
+        id: 'find-201',
+        title: 'Missing Explicit Backup Rules Configuration',
+        severity: 'LOW',
+        category: 'Manifest & Permissions',
+        shortExplanation: 'android:allowBackup is true without specific data-extraction-rules XML definition.',
+        evidence: '<application android:allowBackup="true" ...>',
+        affectedComponent: 'AndroidManifest.xml',
+        whyItMatters:
+          'Device backups via ADB might extract cached personal telemetry data if custom extraction rules are not declared.',
+        recommendedFix:
+          'Define android:dataExtractionRules="@xml/data_extraction_rules" specifying which files should be omitted from cloud backups.',
+        isHeuristic: false,
+        cwe: 'CWE-312',
+      },
+      {
+        id: 'find-202',
+        title: 'Modern Jetpack Security Crypto Keystore Verified',
+        severity: 'INFORMATIONAL',
+        category: 'Cryptography',
+        shortExplanation: 'Positive observation: MasterKeys and EncryptedFile APIs properly configured.',
+        evidence: 'MasterKey.Builder(context, MasterKey.DEFAULT_MASTER_KEY_ALIAS)...',
+        affectedComponent: 'io.healthsync.data.SecureStorage.kt',
+        whyItMatters:
+          'Good security hygiene: AES-256 GCM authenticated encryption implemented with hardware-backed key protection.',
+        recommendedFix: 'No remediation necessary.',
+        isHeuristic: false,
+      },
+      {
+        id: 'find-203',
+        title: 'Hermetic Network Security Config Detected',
+        severity: 'INFORMATIONAL',
+        category: 'Network Security',
+        shortExplanation: 'Positive observation: Cleartext traffic is strictly forbidden across all domains.',
+        evidence: '<base-config cleartextTrafficPermitted="false" />',
+        affectedComponent: 'res/xml/network_security_config.xml',
+        whyItMatters: 'Guarantees that all outgoing socket connections will reject unencrypted transport.',
+        recommendedFix: 'No remediation necessary.',
+        isHeuristic: false,
+      },
+    ],
+  },
+};
+
+export const INITIAL_FILES: APKRecord[] = [
+  {
+    id: 'apk-001',
+    fileName: 'CryptoVault-v2.4.1.apk',
+    fileSizeBytes: 34812736,
+    formattedSize: '33.2 MB',
+    uploadDate: 'Nov 20, 2026',
+    lastScanDate: 'Nov 20, 2026',
+    status: 'ISSUES_FOUND',
+    findingsCount: 9,
+    packageName: 'com.cryptovault.wallet.secure',
+    reportId: 'rep-001',
+  },
+  {
+    id: 'apk-002',
+    fileName: 'HealthSync-Tracker-v1.0.apk',
+    fileSizeBytes: 18245900,
+    formattedSize: '17.4 MB',
+    uploadDate: 'Nov 18, 2026',
+    lastScanDate: 'Nov 18, 2026',
+    status: 'SAFE',
+    findingsCount: 3,
+    packageName: 'io.healthsync.tracker',
+    reportId: 'rep-002',
+  },
+];
+
+export function formatFileSize(bytes: number): string {
+  if (bytes === 0) return '0 Bytes';
+  const k = 1024;
+  const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
+
+export const mobileApi = {
+  async getFiles(): Promise<APKRecord[]> {
+    try {
+      const stored = await AsyncStorage.getItem(STORAGE_FILES_KEY);
+      if (!stored) {
+        await AsyncStorage.setItem(STORAGE_FILES_KEY, JSON.stringify(INITIAL_FILES));
+        return INITIAL_FILES;
+      }
+      return JSON.parse(stored);
+    } catch {
+      return INITIAL_FILES;
+    }
+  },
+
+  async deleteFile(apkId: string): Promise<boolean> {
+    try {
+      const files = await this.getFiles();
+      const target = files.find((f) => f.id === apkId);
+      const updated = files.filter((f) => f.id !== apkId);
+      await AsyncStorage.setItem(STORAGE_FILES_KEY, JSON.stringify(updated));
+
+      if (target) {
+        const storedReports = await AsyncStorage.getItem(STORAGE_REPORTS_KEY);
+        const reports = storedReports ? JSON.parse(storedReports) : { ...MOCK_REPORTS };
+        delete reports[target.reportId];
+        await AsyncStorage.setItem(STORAGE_REPORTS_KEY, JSON.stringify(reports));
+      }
+      return true;
+    } catch (e) {
+      console.error('Failed to delete file', e);
+      return false;
+    }
+  },
+
+  async getReport(reportId: string): Promise<SecurityReport | null> {
+    try {
+      const stored = await AsyncStorage.getItem(STORAGE_REPORTS_KEY);
+      const reports: Record<string, SecurityReport> = stored ? JSON.parse(stored) : MOCK_REPORTS;
+      return reports[reportId] || MOCK_REPORTS[reportId] || null;
+    } catch {
+      return MOCK_REPORTS[reportId] || null;
+    }
+  },
+
+  async getUserProfile(): Promise<UserProfile> {
+    try {
+      const stored = await AsyncStorage.getItem(STORAGE_PROFILE_KEY);
+      if (!stored) {
+        await AsyncStorage.setItem(STORAGE_PROFILE_KEY, JSON.stringify(INITIAL_USER_PROFILE));
+        return INITIAL_USER_PROFILE;
+      }
+      return JSON.parse(stored);
+    } catch {
+      return INITIAL_USER_PROFILE;
+    }
+  },
+
+  async updateUserProfile(profile: Partial<UserProfile>): Promise<UserProfile> {
+    const current = await this.getUserProfile();
+    const updated = { ...current, ...profile };
+    await AsyncStorage.setItem(STORAGE_PROFILE_KEY, JSON.stringify(updated));
+    return updated;
+  },
+
+  async saveNewScan(
+    fileName: string,
+    fileSizeBytes: number,
+    report: SecurityReport
+  ): Promise<APKRecord> {
+    const apkId = `apk-${Date.now()}`;
+    const reportId = report.id;
+
+    const newRecord: APKRecord = {
+      id: apkId,
+      fileName,
+      fileSizeBytes,
+      formattedSize: formatFileSize(fileSizeBytes),
+      uploadDate: 'Just now',
+      lastScanDate: 'Just now',
+      status: report.status,
+      findingsCount: report.findings.length,
+      packageName: report.packageName,
+      reportId,
+    };
+
+    const files = await this.getFiles();
+    const updatedFiles = [newRecord, ...files];
+    await AsyncStorage.setItem(STORAGE_FILES_KEY, JSON.stringify(updatedFiles));
+
+    const storedReports = await AsyncStorage.getItem(STORAGE_REPORTS_KEY);
+    const reports = storedReports ? JSON.parse(storedReports) : { ...MOCK_REPORTS };
+    reports[reportId] = report;
+    await AsyncStorage.setItem(STORAGE_REPORTS_KEY, JSON.stringify(reports));
+
+    return newRecord;
+  },
+};
